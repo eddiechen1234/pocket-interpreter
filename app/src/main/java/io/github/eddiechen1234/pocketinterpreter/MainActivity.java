@@ -899,9 +899,25 @@ public class MainActivity extends Activity {
 
     interface Heard { void on(String text); }
 
+    /** Incremented for every listen session; callbacks from older (cancelled) sessions are ignored. */
+    int session = 0;
+
     void stopListening() {
-        if (sr != null) sr.cancel();
+        session++;
+        releaseRecognizer();
         resetMic();
+    }
+
+    /**
+     * A SpeechRecognizer is used for one session only. Reusing one right after cancel() (or while
+     * text-to-speech is still releasing the audio) makes many devices answer ERROR_CLIENT (5).
+     */
+    void releaseRecognizer() {
+        if (sr != null) {
+            try { sr.cancel(); } catch (Exception ignored) { }
+            try { sr.destroy(); } catch (Exception ignored) { }
+            sr = null;
+        }
     }
 
     void resetMic() {
@@ -921,6 +937,9 @@ public class MainActivity extends Activity {
             case SpeechRecognizer.ERROR_AUDIO: return "麥克風錄音錯誤";
             case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: return "沒有麥克風權限";
             case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: return "辨識器忙碌中，請稍後再試";
+            case SpeechRecognizer.ERROR_CLIENT: return "語音辨識暫時無法使用，請再按一次麥克風";
+            case 10: return "語音辨識請求太頻繁，請稍等幾秒再試";
+            case 11: return "語音辨識服務中斷，請再試一次";
             case 12: case 13: return "這個語言不支援語音辨識（可在 Google 語音設定下載離線語言）";
             default: return "語音辨識錯誤（代碼 " + e + "）";
         }
@@ -936,21 +955,49 @@ public class MainActivity extends Activity {
             setStatus("這支手機沒有語音辨識服務（請安裝或啟用 Google App）", true);
             return;
         }
+        boolean wasSpeaking = tts != null && tts.isSpeaking();
         if (tts != null) tts.stop();
         stopListening();
-        if (sr == null) sr = SpeechRecognizer.createSpeechRecognizer(this);
         listeningButton = btn;
         listeningLabel = btn.getText().toString();
         btn.setText("● 聆聽中…（再按一下停止）");
         btn.setBackground(round(C_DANGER, 40, 0));
+        setStatus("準備聆聽…", false);
+        final int mySession = session;
+        // Give the audio system a moment after stopping TTS / the previous recognizer
+        main.postDelayed(new Runnable() {
+            public void run() { startRecognizer(mySession, fromIdx, cb, true); }
+        }, wasSpeaking ? 400 : 150);
+    }
+
+    void startRecognizer(final int mySession, final int fromIdx, final Heard cb, final boolean mayRetry) {
+        if (mySession != session || isFinishing()) return; // cancelled meanwhile
+        releaseRecognizer();
+        sr = SpeechRecognizer.createSpeechRecognizer(this);
         sr.setRecognitionListener(new RecognitionListener() {
-            public void onReadyForSpeech(Bundle params) { setStatus("請說話（" + LANGS[fromIdx][1] + "）", false); }
+            public void onReadyForSpeech(Bundle params) {
+                if (mySession == session) setStatus("請說話（" + LANGS[fromIdx][1] + "）", false);
+            }
             public void onBeginningOfSpeech() {}
             public void onRmsChanged(float rmsdB) {}
             public void onBufferReceived(byte[] buffer) {}
-            public void onEndOfSpeech() { setStatus("辨識中…", false); }
-            public void onError(int error) { resetMic(); setStatus(speechError(error), true); }
+            public void onEndOfSpeech() { if (mySession == session) setStatus("辨識中…", false); }
+            public void onError(int error) {
+                if (mySession != session) return; // late error from a session we already cancelled
+                if (mayRetry && (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY)) {
+                    // One automatic retry with a brand-new recognizer
+                    main.postDelayed(new Runnable() {
+                        public void run() { startRecognizer(mySession, fromIdx, cb, false); }
+                    }, 500);
+                    return;
+                }
+                releaseRecognizer();
+                resetMic();
+                setStatus(speechError(error), true);
+            }
             public void onResults(Bundle results) {
+                if (mySession != session) return;
+                releaseRecognizer();
                 resetMic();
                 ArrayList<String> list = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                 String heard = list != null && !list.isEmpty() ? list.get(0) : "";
@@ -968,6 +1015,12 @@ public class MainActivity extends Activity {
         i.putExtra("android.speech.extra.ONLY_RETURN_LANGUAGE_PREFERENCE", true);
         i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
         i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
-        sr.startListening(i);
+        try {
+            sr.startListening(i);
+        } catch (Exception e) {
+            releaseRecognizer();
+            resetMic();
+            setStatus("無法啟動語音辨識：" + e.getMessage(), true);
+        }
     }
 }

@@ -4,7 +4,10 @@ plugins {
 
 // Upload key for Google Play comes from the environment (GitHub Actions secrets).
 // Without it the release build is signed with the debug key: fine for testing, not for Play.
-val uploadKeystore: String? = System.getenv("UPLOAD_KEYSTORE")
+// Unset GitHub secrets arrive as empty strings, treat them as missing
+fun env(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
+
+val uploadKeystore: String? = env("UPLOAD_KEYSTORE")
 
 android {
     namespace = "io.github.eddiechen1234.pocketinterpreter"
@@ -15,7 +18,7 @@ android {
         minSdk = 24
         targetSdk = 36
         // Every CI run gets a higher versionCode, so any build can be uploaded to Play.
-        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = env("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionName = "1.0.0"
     }
 
@@ -23,9 +26,9 @@ android {
         if (uploadKeystore != null) {
             create("upload") {
                 storeFile = file(uploadKeystore)
-                storePassword = System.getenv("KEYSTORE_PASS")
-                keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
-                keyPassword = System.getenv("KEY_PASS") ?: System.getenv("KEYSTORE_PASS")
+                storePassword = env("KEYSTORE_PASS")
+                keyAlias = env("KEY_ALIAS") ?: "upload"
+                keyPassword = env("KEY_PASS") ?: env("KEYSTORE_PASS")
             }
         }
     }
